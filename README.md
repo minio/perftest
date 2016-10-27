@@ -4,13 +4,13 @@ This repository shows the results of some performance tests that were executed o
 
 ## Setup
 
-<<describe test setup>>
+<< describe test setup >>
 
-<<describe setup.sh>>
+<< describe setup.sh >>
 
 ## Installation
 
-<< describe how to install a server>>
+<< describe how to install a server >>
 
 ## Results
 
@@ -23,4 +23,4 @@ This repository shows the results of some performance tests that were executed o
 
 ## Code
 
-<<describe perftest.go>>
+<< describe perftest.go >>
