@@ -69,7 +69,7 @@ minio server 172.31.13.67:/mnt/distr 172.31.13.66:/mnt/distr 172.31.13.69:/mnt/d
 ## Running Performance Tests
 
 ```
-time ./perftest -p "12" -d 2 -b "lifedrive-100m-usw2" -r "us-west-2" -e "https://s3-us-west-2.amazonaws.com" -a "AKIAI2LOW75FPFTZ5VZA" -s "9RjNUCGY2c+zibVbW3Up8sfx68uFmvsL+4lbwAfE"
+time ./perftest -p "12" -d 2 -b "lifedrive-100m-usw2" -r "us-west-2" -e "https://s3-us-west-2.amazonaws.com" -a "ACCESS" -s "SECRET"
 ```
 
 
