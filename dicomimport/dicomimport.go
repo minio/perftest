@@ -25,7 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/minio/blake2b-simd"
-	_ "io/ioutil"
+	"io/ioutil"
 	"os"
 	"sync"
 	"time"
@@ -46,16 +46,21 @@ func modifyUid(uid, modifier string) string {
 	return s
 }
 
+var offsets = map[string]int{
+	"CT": 0x1e0,
+	"MR": 0x56,
+}
+
 // generateBlob generates an image of a certain modality and makes sure
 // that is had a unique SOP Instance UID
 func genererateBlob(modifier, modality string) ([]byte, error) {
 
-	data, err := Asset("data/"+modality+".dcm")
+	data, err := Asset("data/" + modality + ".dcm")
 	if err != nil {
 		return nil, err
 	}
 
-	offset := 0x1e0
+	offset := offsets[modality]
 	size := int(data[offset]) + int(data[offset+1])*0x100
 	uid := string(data[offset+2 : offset+2+size])
 	uid = modifyUid(uid, modifier)
@@ -77,11 +82,12 @@ func hashBlob(data []byte) (string, error) {
 	return fmt.Sprintf("%x", sum), nil
 }
 
+func saveBlob(data []byte, hash string) {
+	ioutil.WriteFile(hash, data, os.ModePerm)
+}
+
 // uploadBlob does an upload to the S3/Minio server
 func uploadBlob(data []byte, hash string) error {
-
-	//err := ioutil.WriteFile(hash, data, os.ModePerm)
-	//fmt.Println(err)
 
 	credsUp := credentials.NewStaticCredentials("", "", "")
 	sessUp := session.New(aws.NewConfig().WithCredentials(credsUp).WithRegion("us-east-1").WithEndpoint("http://127.0.0.1:9000").WithS3ForcePathStyle(true))
@@ -115,6 +121,7 @@ func putWorker(imageCh <-chan imageDescriptor, outCh chan<- int) {
 			fmt.Println("Exiting out due to error from hashBlob:", err)
 			return
 		}
+		//saveBlob(data, hash)
 		err = uploadBlob(data, hash)
 		if err != nil {
 			fmt.Println("Exiting out due to error from uploadBlob:", err)
@@ -134,6 +141,11 @@ func main() {
 	flag.Parse()
 	if *modality == "" {
 		fmt.Println("Bad arguments")
+		return
+	}
+	_, found := offsets[*modality]
+	if !found {
+		fmt.Println("Unknown modality:", *modality)
 		return
 	}
 
@@ -159,7 +171,7 @@ func main() {
 		for i := 0; i < *runs; i++ {
 			t := fmt.Sprintf("%v", time.Now().UnixNano())
 			modifier := fmt.Sprintf("%d.%v.%d", pid, t[len(t)-7:], i)
-			imageCh <- imageDescriptor{instUID: modifier, modality: "CT"}
+			imageCh <- imageDescriptor{instUID: modifier, modality: *modality}
 		}
 
 		// Close input channel
@@ -182,8 +194,8 @@ func main() {
 	elapsed := time.Since(start)
 	fmt.Println("Elapsed time :", elapsed)
 	seconds := float64(elapsed) / float64(time.Second)
-	fmt.Printf("Speed        : %4.0f objs/sec\n", float64(*runs) / seconds)
-	fmt.Printf("Bandwidth    : %4.0f MBit/sec\n", 8 * float64(totalSize) / seconds / 1024 / 1024)
+	fmt.Printf("Speed        : %4.0f objs/sec\n", float64(*runs)/seconds)
+	fmt.Printf("Bandwidth    : %4.0f MBit/sec\n", 8*float64(totalSize)/seconds/1024/1024)
 
 	//fmt.Println("Number of objects:", len(list))
 }
