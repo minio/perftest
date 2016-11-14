@@ -22,7 +22,24 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"syscall"
 )
+
+// For all unixes we need to bump allowed number of open files to a
+// higher value than its usual default of '1024'. The reasoning is
+// that this value is too small.
+func setMaxOpenFiles() error {
+	var rLimit syscall.Rlimit
+	err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+	if err != nil {
+		return err
+	}
+	// Set the current limit to Max, it is usually around 4096.
+	// TO increase this limit further user has to manually edit
+	// `/etc/security/limits.conf`
+	rLimit.Cur = rLimit.Max
+	return syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+}
 
 func init() {
 	os.Setenv("ACCESS_KEY", os.Getenv("ACCESS_KEY"))
@@ -32,6 +49,13 @@ func init() {
 }
 
 func main() {
+
+	setErr := setMaxOpenFiles()
+	if setErr != nil {
+		fmt.Println("Error bumping up open file limits: <ERROR> ", setErr)
+		return
+	}
+
 	concurrency, err := strconv.Atoi(os.Getenv("CONCURRENCY"))
 	if err != nil {
 		fmt.Println("Please set a valid integer for concurrency level. ex: `export CONCURRENCY=100`: ", err)
