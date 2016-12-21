@@ -2,7 +2,7 @@
 
 Uploads the given file for a total of 400 times and 80 asynchronous uploads.
 
-# Configure and Run
+# Configure.
 
 - open minio.json 
 
@@ -22,11 +22,9 @@ Uploads the given file for a total of 400 times and 80 asynchronous uploads.
   }
   ```
 
-
-- ```sh
+# Run.
+```sh
   $ npm install minio@3 async uuid 
-  ```
 
-- ```sh
   $ node pound-it.js
-  ```
+```
