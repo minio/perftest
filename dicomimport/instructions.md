@@ -1,9 +1,31 @@
 
 # dicomimport 
 
+## Introduction
+
+This is a load testing tool for Minio (or any other S3 compatible server) with an ephasis on medical images in the DICOM format. It embeds images of various modalities that are modified on the fly to generate unique binary objects. Each image is then hashed before being uploaded to the server whereby the hash is used as a key name of the object.
+
 ## Downloading 
 
 You can download the Windows executable for dicomimport from here:
+
+## Building from source
+
+Make sure you have git and golang installed, and then run as follows:
+
+```
+go get github.com/minio/perftest/dicomimport
+```
+
+## Preparation
+
+Make sure a bucket called dicom is available.
+
+Using `mc` you can create it as follows:
+
+```
+mc mb myminio/dicom
+```
 
 ## Configuration
 
@@ -15,6 +37,7 @@ In order to run `dicomimport` you first need to configure the access information
 
 Here are the command line statements to define the environment variables for this: 
 
+Windows:
 ```
 set ACCESSKEY=5D94Q9WPYAV26D068GIO
 set SECRETKEY=GOgBwUsaKn3RmWwO25zq+ZyqLeuSK2aNGu7Z7GTA
@@ -29,8 +52,8 @@ You can run dicomimport as follows:
 dicomimport -m "CT" -w 50 -r 1000
 ```
 
-Meaning of command-line flags
+The meaning of command line flags is as follows
 
-- `-m`: modality
-- `-w`: workers
-- `-r`: runs
+- `-m`: modality (currently "CT" or "MR")
+- `-w`: number of worker threads in parallel
+- `-r`: total number of objects to upload
