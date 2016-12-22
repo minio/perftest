@@ -57,3 +57,17 @@ The meaning of command line flags is as follows
 - `-m`: modality (currently "CT" or "MR")
 - `-w`: number of worker threads in parallel
 - `-r`: total number of objects to upload
+
+## Output
+
+Here is a typical output
+
+```
+C:\Users\Administrator>dicomimport -m "CT" -w 100 -r 1000
+Total size   : 525968000 bytes
+Elapsed time : 4.2669473s
+Speed        :  234 objs/sec
+Bandwidth    :  940 MBit/sec
+```
+
+The last two lines show the speed in objects per second as well as bandwidth in MBit/sec
