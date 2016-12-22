@@ -89,8 +89,8 @@ func saveBlob(data []byte, hash string) {
 // uploadBlob does an upload to the S3/Minio server
 func uploadBlob(data []byte, hash string) error {
 
-	credsUp := credentials.NewStaticCredentials("", "", "")
-	sessUp := session.New(aws.NewConfig().WithCredentials(credsUp).WithRegion("us-east-1").WithEndpoint("http://127.0.0.1:9000").WithS3ForcePathStyle(true))
+	credsUp := credentials.NewStaticCredentials(os.Getenv("ACCESSKEY"), os.Getenv("SECRETKEY"), "")
+	sessUp := session.New(aws.NewConfig().WithCredentials(credsUp).WithRegion("us-east-1").WithEndpoint(os.Getenv("ENDPOINT")).WithS3ForcePathStyle(true))
 
 	// split key at 2nd character to force creation of directory
 	key := hash[0:2] + "/" + hash[2:]
@@ -139,6 +139,20 @@ type imageDescriptor struct {
 
 func main() {
 	flag.Parse()
+
+	if os.Getenv("ACCESSKEY") == "" {
+		fmt.Println("Environment variable ACCESSKEY needs to be set")
+		return
+	}
+	if os.Getenv("SECRETKEY") == "" {
+		fmt.Println("Environment variable SECRETKEY needs to be set")
+		return
+	}
+	if os.Getenv("ENDPOINT") == "" {
+		fmt.Println("Environment variable ENDPOINT needs to be set")
+		return
+	}
+
 	if *modality == "" {
 		fmt.Println("Bad arguments")
 		return
