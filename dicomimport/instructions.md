@@ -7,7 +7,7 @@ This is a load testing tool for Minio (or any other S3 compatible server) with a
 
 ## Downloading 
 
-You can download the Windows executable for dicomimport from here:
+You can download the Windows executable for dicomimport from here: https://github.com/minio/perftest/releases/download/v0.1/dicomimport.exe
 
 ## Building from source
 
