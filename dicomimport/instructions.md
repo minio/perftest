@@ -60,7 +60,7 @@ The meaning of command line flags is as follows
 
 ## Output
 
-Here is a typical output
+Here is a typical output:
 
 ```
 C:\Users\Administrator>dicomimport -m "CT" -w 100 -r 1000
@@ -70,4 +70,4 @@ Speed        :  234 objs/sec
 Bandwidth    :  940 MBit/sec
 ```
 
-The last two lines show the speed in objects per second as well as bandwidth in MBit/sec
+The last two lines show the speed in objects per second as well as bandwidth in MBit/sec.
