@@ -19,7 +19,20 @@
 - Set the Minio server endpoint.
 
   ```sh
-  export ENDPOINT=xxx.xx.xxx.xxx:<PORT>
+  export  export S3_ADDRESS=xxx.xx.xxx.xxx:<PORT>
+  ```
+
+- Set S3_SECURE to `true` for htttps connections.
+
+  ```sh
+  export S3_SECURE=true
+  ```
+      OR 
+
+  Set S3_SECURE to `false` for htttp connections.
+
+  ```sh
+  export S3_SECURE=false
   ```
 
 - Set concurrent level of the load.

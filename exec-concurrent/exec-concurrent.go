@@ -45,6 +45,7 @@ func init() {
 	os.Setenv("ACCESS_KEY", os.Getenv("ACCESS_KEY"))
 	os.Setenv("SECRET_KEY", os.Getenv("SECRET_KEY"))
 	os.Setenv("ENDPOINT", os.Getenv("ENDPOINT"))
+	os.Setenv("S3_SECURE", os.Getenv("S3_SECURE"))
 	os.Setenv("CONCURRENCY", os.Getenv("CONCURRENCY"))
 }
 

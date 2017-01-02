@@ -1,0 +1,19 @@
+{
+	"comment": "",
+	"ignore": "test",
+	"package": [
+		{
+			"checksumSHA1": "C/MND9GBgvU61fHeJBZVqoZ3UGM=",
+			"path": "github.com/minio/minio-go",
+			"revision": "52cc94e879db78c2e2c6e160869df943137ec4cd",
+			"revisionTime": "2017-01-01T22:57:21Z"
+		},
+		{
+			"checksumSHA1": "neH34/65OXeKHM/MlV8MbhcdFBc=",
+			"path": "github.com/minio/minio-go/pkg/policy",
+			"revision": "52cc94e879db78c2e2c6e160869df943137ec4cd",
+			"revisionTime": "2017-01-01T22:57:21Z"
+		}
+	],
+	"rootPath": "github.com/minio/perftest/exec-concurrent"
+}
