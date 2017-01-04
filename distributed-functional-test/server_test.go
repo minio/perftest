@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -39,8 +40,6 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
-
-	. "gopkg.in/check.v1"
 )
 
 // Signature and API related constants.
@@ -291,15 +290,25 @@ type CommonPrefix struct {
 	Prefix string
 }
 
-func verifyError(c *C, response *http.Response, code, description string, statusCode int) {
+func verifyError(t *testing.T, response *http.Response, code, description string, statusCode int) {
 	data, err := ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	errorResponse := APIErrorResponse{}
 	err = xml.Unmarshal(data, &errorResponse)
-	c.Assert(err, IsNil)
-	c.Assert(errorResponse.Code, Equals, code)
-	c.Assert(errorResponse.Message, Equals, description)
-	c.Assert(response.StatusCode, Equals, statusCode)
+	if err != nil {
+		t.Fatalf("%v, %s", err, description)
+	}
+	if errorResponse.Code != code {
+		t.Errorf("Expected response code to be %v, got %v.", code, errorResponse.Code)
+	}
+	if errorResponse.Message != description {
+		t.Errorf("Expected response Message to be %v, got %v.", description, errorResponse.Message)
+	}
+	if response.StatusCode != statusCode {
+		t.Errorf("Expected response status code to be %v, got %v.", statusCode, response.StatusCode)
+	}
 }
 
 // queryEncode - encodes query values in their URL encoded form. In
@@ -932,64 +941,70 @@ func newTestSignedRequestV4(method, urlStr string, contentLength int64, body io.
 	return req, nil
 }
 
-// API suite container common to both FS and XL.
-type TestSuiteCommon struct {
-	endPoint  string
-	accessKey string
-	secretKey string
-	signer    signerType
-	transport *http.Transport
+// variables to store Endpoint/URL of the server to be tested,
+// its access key and secret key.
+var endPoint, accessKey, secretKey string
+var signer signerType
+
+// TestMain - Test execution starts here
+func TestMain(m *testing.M) {
+	// Get the endpoint to be tested from the environment.
+	// Should have set `export S3_POINT=<IP>:<PORT>`.
+	endPoint = os.Getenv("S3_ENDPOINT")
+
+	accessKey = os.Getenv("ACCESS_KEY")
+	secretKey = os.Getenv("SECRET_KEY")
+
+	signer = signerV4
+
+	// pasrse the env variables.
+	// Run all the tests and exit.
+	os.Exit(m.Run())
 }
 
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) { TestingT(t) }
-
-// Init and run test on XL backend.
-var _ = Suite(&TestSuiteCommon{signer: signerV4})
-
-// Setting up the test suite.
-func (s *TestSuiteCommon) SetUpSuite(c *C) {
-	s.transport = &http.Transport{}
-
-	s.endPoint = os.Getenv("ENDPOINT")
-	s.accessKey = os.Getenv("ACCESS_KEY")
-	s.secretKey = os.Getenv("SECRET_KEY")
-}
-
-func (s *TestSuiteCommon) TestBucketSQSNotification(c *C) {
-	c.Log("here")
+func TestBucketSQSNotification(t *testing.T) {
 	// Sample bucket notification.
 	bucketNotificationBuf := `<NotificationConfiguration><QueueConfiguration><Event>s3:ObjectCreated:Put</Event><Filter><S3Key><FilterRule><Name>prefix</Name><Value>images/</Value></FilterRule></S3Key></Filter><Id>1</Id><Queue>arn:minio:sqs:us-east-1:444455556666:amqp</Queue></QueueConfiguration></NotificationConfiguration>`
 	// generate a random bucket Name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the request.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// assert the http response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
-	request, err = newTestSignedRequest("PUT", getPutNotificationURL(s.endPoint, bucketName),
-		int64(len(bucketNotificationBuf)), bytes.NewReader([]byte(bucketNotificationBuf)), s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutNotificationURL(endPoint, bucketName),
+		int64(len(bucketNotificationBuf)), bytes.NewReader([]byte(bucketNotificationBuf)), accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request.
 	response, err = client.Do(request)
 
-	c.Assert(err, IsNil)
-	verifyError(c, response, "InvalidArgument", "A specified destination ARN does not exist or is not well-formed. Verify the destination ARN.", http.StatusBadRequest)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	verifyError(t, response, "InvalidArgument", "A specified destination ARN does not exist or is not well-formed. Verify the destination ARN.", http.StatusBadRequest)
 }
 
 // TestBucketPolicy - Inserts the bucket policy and verifies it by fetching the policy back.
 // Deletes the policy and verifies the deletion by fetching it back.
-func (s *TestSuiteCommon) TestBucketPolicy(c *C) {
+func TestBucketPolicy(t *testing.T) {
 
 	// Sample bucket policy.
 	bucketPolicyBuf := `{"Version":"2012-10-17","Statement":[{"Action":["s3:GetBucketLocation","s3:ListBucket"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::%s"],"Sid":""},{"Action":["s3:GetObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::%s/this*"],"Sid":""}]}`
@@ -999,150 +1014,219 @@ func (s *TestSuiteCommon) TestBucketPolicy(c *C) {
 	// create the policy statement string with the randomly generated bucket name.
 	bucketPolicyStr := fmt.Sprintf(bucketPolicyBuf, bucketName, bucketName)
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the request.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the http response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	/// Put a new bucket policy.
-	request, err = newTestSignedRequest("PUT", getPutPolicyURL(s.endPoint, bucketName),
-		int64(len(bucketPolicyStr)), bytes.NewReader([]byte(bucketPolicyStr)), s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutPolicyURL(endPoint, bucketName),
+		int64(len(bucketPolicyStr)), bytes.NewReader([]byte(bucketPolicyStr)), accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusNoContent)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusNoContent {
+		t.Errorf("Expected response status %s, got %s", http.StatusNoContent, response.StatusCode)
+	}
 
 	// Fetch the uploaded policy.
-	request, err = newTestSignedRequest("GET", getGetPolicyURL(s.endPoint, bucketName), 0, nil,
-		s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetPolicyURL(endPoint, bucketName), 0, nil,
+		accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	bucketPolicyReadBuf, err := ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Verify if downloaded policy matches with previousy uploaded.
-	c.Assert(bytes.Equal([]byte(bucketPolicyStr), bucketPolicyReadBuf), Equals, true)
+	if !bytes.Equal([]byte(bucketPolicyStr), bucketPolicyReadBuf) {
+		t.Fatalf("The downloaded policy doesn't match with the upload one.\nExpected:\n %s, Got: \n %s", bucketPolicyStr, string(bucketPolicyReadBuf))
+	}
 
 	// Delete policy.
-	request, err = newTestSignedRequest("DELETE", getDeletePolicyURL(s.endPoint, bucketName), 0, nil,
-		s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("DELETE", getDeletePolicyURL(endPoint, bucketName), 0, nil,
+		accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusNoContent)
-
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusNoContent {
+		t.Errorf("Expected response status %s, got %s", http.StatusNoContent, response.StatusCode)
+	}
 	// Verify if the policy was indeed deleted.
-	request, err = newTestSignedRequest("GET", getGetPolicyURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetPolicyURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusNotFound)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected response status %v, got %v", http.StatusNotFound, response.StatusCode)
+	}
 }
 
 // TestDeleteBucket - validates DELETE bucket operation.
-func (s *TestSuiteCommon) TestDeleteBucket(c *C) {
+func TestDeleteBucket(t *testing.T) {
 	bucketName := getRandomBucketName()
 
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// construct request to delete the bucket.
-	request, err = newTestSignedRequest("DELETE", getDeleteBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("DELETE", getDeleteBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Assert the response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusNoContent)
+	if response.StatusCode != http.StatusNoContent {
+		t.Errorf("Expected response status %s, got %s", http.StatusNoContent, response.StatusCode)
+	}
 }
 
 // TestDeleteBucketNotEmpty - Validates the operation during an attempt to delete a non-empty bucket.
-func (s *TestSuiteCommon) TestDeleteBucketNotEmpty(c *C) {
+func TestDeleteBucketNotEmpty(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the request.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// generate http request for an object upload.
 	// "test-object" is the object name.
 	objectName := "test-object"
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the request to complete object upload.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the status code of the response.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// constructing http request to delete the bucket.
 	// making an attempt to delete an non-empty bucket.
 	// expected to fail.
-	request, err = newTestSignedRequest("DELETE", getDeleteBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("DELETE", getDeleteBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusConflict)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusConflict {
+		t.Errorf("Expected response status %s, got %s", http.StatusConflict, response.StatusCode)
+	}
 
 }
 
-func (s *TestSuiteCommon) TestListenBucketNotificationHandler(c *C) {
+func TestListenBucketNotificationHandler(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	req, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	req, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the request.
 	response, err := client.Do(req)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the http response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	invalidBucket := "Invalid\\Bucket"
 	tooByte := bytes.Repeat([]byte("a"), 1025)
@@ -1151,71 +1235,93 @@ func (s *TestSuiteCommon) TestListenBucketNotificationHandler(c *C) {
 	invalidEvents := []string{"invalidEvent"}
 
 	req, err = newTestSignedRequest("GET",
-		getListenBucketNotificationURL(s.endPoint, invalidBucket, []string{}, []string{}, []string{}),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+		getListenBucketNotificationURL(endPoint, invalidBucket, []string{}, []string{}, []string{}),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the request.
 	response, err = client.Do(req)
-	c.Assert(err, IsNil)
-	verifyError(c, response, "InvalidBucketName", "The specified bucket is not valid.", http.StatusBadRequest)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	verifyError(t, response, "InvalidBucketName", "The specified bucket is not valid.", http.StatusBadRequest)
 
 	req, err = newTestSignedRequest("GET",
-		getListenBucketNotificationURL(s.endPoint, bucketName, []string{}, []string{}, invalidEvents),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+		getListenBucketNotificationURL(endPoint, bucketName, []string{}, []string{}, invalidEvents),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the request.
 	response, err = client.Do(req)
-	c.Assert(err, IsNil)
-	verifyError(c, response, "InvalidArgument", "A specified event is not supported for notifications.", http.StatusBadRequest)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	verifyError(t, response, "InvalidArgument", "A specified event is not supported for notifications.", http.StatusBadRequest)
 
 	req, err = newTestSignedRequest("GET",
-		getListenBucketNotificationURL(s.endPoint, bucketName, []string{tooBigPrefix}, []string{}, validEvents),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+		getListenBucketNotificationURL(endPoint, bucketName, []string{tooBigPrefix}, []string{}, validEvents),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the request.
 	response, err = client.Do(req)
-	c.Assert(err, IsNil)
-	verifyError(c, response, "InvalidArgument", "Size of filter rule value cannot exceed 1024 bytes in UTF-8 representation", http.StatusBadRequest)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	verifyError(t, response, "InvalidArgument", "Size of filter rule value cannot exceed 1024 bytes in UTF-8 representation", http.StatusBadRequest)
 
 	req, err = newTestSignedRequest("GET",
-		getListenBucketNotificationURL(s.endPoint, bucketName, []string{}, []string{}, validEvents),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+		getListenBucketNotificationURL(endPoint, bucketName, []string{}, []string{}, validEvents),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	req.Header.Set("x-amz-content-sha256", "somethingElse")
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the request.
 	response, err = client.Do(req)
-	c.Assert(err, IsNil)
-	if s.signer == signerV4 {
-		verifyError(c, response, "XAmzContentSHA256Mismatch", "The provided 'x-amz-content-sha256' header does not match what was computed.", http.StatusBadRequest)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if signerV4 == signerV4 {
+		verifyError(t, response, "XAmzContentSHA256Mismatch", "The provided 'x-amz-content-sha256' header does not match what was computed.", http.StatusBadRequest)
 	}
 
 	// Change global value from 5 second to 100millisecond.
 	globalSNSConnAlive = 100 * time.Millisecond
 	req, err = newTestSignedRequest("GET",
-		getListenBucketNotificationURL(s.endPoint, bucketName,
-			[]string{}, []string{}, validEvents), 0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-	client = http.Client{Transport: s.transport}
+		getListenBucketNotificationURL(endPoint, bucketName,
+			[]string{}, []string{}, validEvents), 0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	client = &http.Client{}
 	// execute the request.
 	response, err = client.Do(req)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// FIXME: uncomment this in future when we have a code to read notifications from.
 	// go func() {
 	// 	buf := bytes.NewReader(tooByte)
 	// 	rreq, rerr := newTestSignedRequest("GET",
-	// 		getPutObjectURL(s.endPoint, bucketName, "myobject/1"),
-	// 		int64(buf.Len()), buf, s.accessKey, s.secretKey, s.signer)
+	// 		getPutObjectURL(endPoint, bucketName, "myobject/1"),
+	// 		int64(buf.Len()), buf, accessKey, secretKey, signerV4)
 	// 	c.Assert(rerr, IsNil)
-	// 	client = http.Client{Transport: s.transport}
+	// 	client = &http.Client{}
 	// 	// execute the request.
 	// 	resp, rerr := client.Do(rreq)
 	// 	c.Assert(rerr, IsNil)
@@ -1225,20 +1331,26 @@ func (s *TestSuiteCommon) TestListenBucketNotificationHandler(c *C) {
 }
 
 // Test deletes multple objects and verifies server resonse.
-func (s *TestSuiteCommon) TestDeleteMultipleObjects(c *C) {
+func TestDeleteMultipleObjects(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the request.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the http response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objectName := "prefix/myobject"
 	delObjReq := DeleteObjectsRequest{
@@ -1248,16 +1360,22 @@ func (s *TestSuiteCommon) TestDeleteMultipleObjects(c *C) {
 		// Obtain http request to upload object.
 		// object Name contains a prefix.
 		objName := fmt.Sprintf("%d/%s", i, objectName)
-		request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objName),
-			0, nil, s.accessKey, s.secretKey, s.signer)
-		c.Assert(err, IsNil)
+		request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objName),
+			0, nil, accessKey, secretKey, signerV4)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
 
-		client = http.Client{Transport: s.transport}
+		client = &http.Client{}
 		// execute the http request.
 		response, err = client.Do(request)
-		c.Assert(err, IsNil)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
 		// assert the status of http response.
-		c.Assert(response.StatusCode, Equals, http.StatusOK)
+		if response.StatusCode != http.StatusOK {
+			t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+		}
 		// Append all objects.
 		delObjReq.Objects = append(delObjReq.Objects, ObjectIdentifier{
 			ObjectName: objName,
@@ -1265,286 +1383,419 @@ func (s *TestSuiteCommon) TestDeleteMultipleObjects(c *C) {
 	}
 	// Marshal delete request.
 	deleteReqBytes, err := xml.Marshal(delObjReq)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// Delete list of objects.
-	request, err = newTestSignedRequest("POST", getMultiDeleteObjectURL(s.endPoint, bucketName),
-		int64(len(deleteReqBytes)), bytes.NewReader(deleteReqBytes), s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-	client = http.Client{Transport: s.transport}
+	request, err = newTestSignedRequest("POST", getMultiDeleteObjectURL(endPoint, bucketName),
+		int64(len(deleteReqBytes)), bytes.NewReader(deleteReqBytes), accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	var deleteResp = DeleteObjectsResponse{}
 	delRespBytes, err := ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	err = xml.Unmarshal(delRespBytes, &deleteResp)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	for i := 0; i < 10; i++ {
 		// All the objects should be under deleted list (including non-existent object)
-		c.Assert(deleteResp.DeletedObjects[i], DeepEquals, delObjReq.Objects[i])
+		if !reflect.DeepEqual(deleteResp.DeletedObjects[i], delObjReq.Objects[i]) {
+			t.Errorf("The objects in delete response didn't match with the ones in the response.")
+		}
 	}
-	c.Assert(len(deleteResp.Errors), Equals, 0)
+	if len(deleteResp.Errors) != 0 {
+		t.Fatalf("Expected the length of the errors to be 0, got %d", len(deleteResp.Errors))
+	}
 
 	// Attempt second time results should be same, NoSuchKey for objects not found
 	// shouldn't be set.
-	request, err = newTestSignedRequest("POST", getMultiDeleteObjectURL(s.endPoint, bucketName),
-		int64(len(deleteReqBytes)), bytes.NewReader(deleteReqBytes), s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-	client = http.Client{Transport: s.transport}
+	request, err = newTestSignedRequest("POST", getMultiDeleteObjectURL(endPoint, bucketName),
+		int64(len(deleteReqBytes)), bytes.NewReader(deleteReqBytes), accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	deleteResp = DeleteObjectsResponse{}
 	delRespBytes, err = ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
-	err = xml.Unmarshal(delRespBytes, &deleteResp)
-	c.Assert(err, IsNil)
-	for i := 0; i < 10; i++ {
-		c.Assert(deleteResp.DeletedObjects[i], DeepEquals, delObjReq.Objects[i])
+	if err != nil {
+		t.Fatalf("%v", err)
 	}
-	c.Assert(len(deleteResp.Errors), Equals, 0)
+	err = xml.Unmarshal(delRespBytes, &deleteResp)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	for i := 0; i < 10; i++ {
+		if !reflect.DeepEqual(deleteResp.DeletedObjects[i], delObjReq.Objects[i]) {
+			t.Errorf("The objects in delete response didn't match with the ones in the response.")
+		}
+	}
+	if len(deleteResp.Errors) != 0 {
+		t.Fatalf("Expected the length of the errors to be 0, got %d", len(deleteResp.Errors))
+	}
 }
 
 // Tests delete object responses and success.
-func (s *TestSuiteCommon) TestDeleteObject(c *C) {
+func TestDeleteObject(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the request.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the http response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objectName := "prefix/myobject"
 	// obtain http request to upload object.
 	// object Name contains a prefix.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the http request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the status of http response.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// object name was "prefix/myobject", an attempt to delelte "prefix"
 	// Should not delete "prefix/myobject"
-	request, err = newTestSignedRequest("DELETE", getDeleteObjectURL(s.endPoint, bucketName, "prefix"),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-	client = http.Client{Transport: s.transport}
+	request, err = newTestSignedRequest("DELETE", getDeleteObjectURL(endPoint, bucketName, "prefix"),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusNoContent)
-
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusNoContent {
+		t.Errorf("Expected response status %s, got %s", http.StatusNoContent, response.StatusCode)
+	}
 	// create http request to HEAD on the object.
 	// this helps to validate the existence of the bucket.
-	request, err = newTestSignedRequest("HEAD", getHeadObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("HEAD", getHeadObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Assert the HTTP response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// create HTTP request to delete the object.
-	request, err = newTestSignedRequest("DELETE", getDeleteObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-	client = http.Client{Transport: s.transport}
+	request, err = newTestSignedRequest("DELETE", getDeleteObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	client = &http.Client{}
 	// execute the http request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the http response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusNoContent)
-
+	if response.StatusCode != http.StatusNoContent {
+		t.Errorf("Expected response status %s, got %s", http.StatusNoContent, response.StatusCode)
+	}
 	// Delete of non-existent data should return success.
-	request, err = newTestSignedRequest("DELETE", getDeleteObjectURL(s.endPoint, bucketName, "prefix/myobject1"),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-	client = http.Client{Transport: s.transport}
+	request, err = newTestSignedRequest("DELETE", getDeleteObjectURL(endPoint, bucketName, "prefix/myobject1"),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	client = &http.Client{}
 	// execute the http request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the http response status.
-	c.Assert(response.StatusCode, Equals, http.StatusNoContent)
+	if response.StatusCode != http.StatusNoContent {
+		t.Errorf("Expected response status %s, got %s", http.StatusNoContent, response.StatusCode)
+	}
 }
 
 // TestNonExistentBucket - Asserts response for HEAD on non-existent bucket.
-func (s *TestSuiteCommon) TestNonExistentBucket(c *C) {
+func TestNonExistentBucket(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// create request to HEAD on the bucket.
 	// HEAD on an bucket helps validate the existence of the bucket.
-	request, err := newTestSignedRequest("HEAD", getHEADBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("HEAD", getHEADBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the http request.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Assert the response.
-	c.Assert(response.StatusCode, Equals, http.StatusNotFound)
+	// assert the http response status code.
+	if response.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected response status %s, got %s", http.StatusNotFound, response.StatusCode)
+	}
 }
 
 // TestEmptyObject - Asserts the response for operation on a 0 byte object.
-func (s *TestSuiteCommon) TestEmptyObject(c *C) {
+func TestEmptyObject(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the http request.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the http response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objectName := "test-object"
 	// construct http request for uploading the object.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the upload request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the http response.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// make HTTP request to fetch the object.
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the http request to fetch object.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the http response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	var buffer bytes.Buffer
 	// extract the body of the response.
 	responseBody, err := ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the http response body content.
-	c.Assert(true, Equals, bytes.Equal(responseBody, buffer.Bytes()))
+	if !bytes.Equal(responseBody, buffer.Bytes()) {
+		t.Errorf("Response Body doesn't match with the expected value.")
+	}
 }
 
-func (s *TestSuiteCommon) TestBucket(c *C) {
+func TestBucket(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
-	request, err = newTestSignedRequest("HEAD", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("HEAD", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 }
 
 // Tests get anonymous object.
-func (s *TestSuiteCommon) TestObjectGetAnonymous(c *C) {
+func TestObjectGetAnonymous(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	buffer := bytes.NewReader([]byte("hello world"))
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the make bucket http request.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the response http status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objectName := "testObject"
 	// create HTTP request to upload the object.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer.Len()), buffer, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer.Len()), buffer, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request to upload the object.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the HTTP response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// initiate anonymous HTTP request to fetch the object which does not exist. We need to return AccessDenied.
-	response, err = client.Get(getGetObjectURL(s.endPoint, bucketName, objectName+".1"))
-	c.Assert(err, IsNil)
+	response, err = client.Get(getGetObjectURL(endPoint, bucketName, objectName+".1"))
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the http response status code.
-	verifyError(c, response, "AccessDenied", "Access Denied.", http.StatusForbidden)
+	verifyError(t, response, "AccessDenied", "Access Denied.", http.StatusForbidden)
 
 	// initiate anonymous HTTP request to fetch the object which does exist. We need to return AccessDenied.
-	response, err = client.Get(getGetObjectURL(s.endPoint, bucketName, objectName))
-	c.Assert(err, IsNil)
+	response, err = client.Get(getGetObjectURL(endPoint, bucketName, objectName))
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the http response status code.
-	verifyError(c, response, "AccessDenied", "Access Denied.", http.StatusForbidden)
+	verifyError(t, response, "AccessDenied", "Access Denied.", http.StatusForbidden)
 }
 
 // TestGetObject - Tests fetching of a small object after its insertion into the bucket.
-func (s *TestSuiteCommon) TestObjectGet(c *C) {
+func TestObjectGet(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	buffer := bytes.NewReader([]byte("hello world"))
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the make bucket http request.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the response http status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objectName := "testObject"
 	// create HTTP request to upload the object.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer.Len()), buffer, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer.Len()), buffer, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request to upload the object.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the HTTP response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// concurrently reading the object, safety check for races.
 	var wg sync.WaitGroup
 	for i := 0; i < testConcurrencyLevel; i++ {
@@ -1553,23 +1804,33 @@ func (s *TestSuiteCommon) TestObjectGet(c *C) {
 			defer wg.Done()
 			// HTTP request to create the bucket.
 			// create HTTP request to fetch the object.
-			getRequest, err := newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-				0, nil, s.accessKey, s.secretKey, s.signer)
-			c.Assert(err, IsNil)
+			getRequest, err := newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+				0, nil, accessKey, secretKey, signerV4)
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
 
-			reqClient := http.Client{Transport: s.transport}
+			reqclient := &http.Client{}
 			// execute the http request to fetch the object.
-			getResponse, err := reqClient.Do(getRequest)
-			c.Assert(err, IsNil)
+			getResponse, err := reqclient.Do(getRequest)
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
 			defer getResponse.Body.Close()
 			// assert the http response status code.
-			c.Assert(getResponse.StatusCode, Equals, http.StatusOK)
+			if getResponse.StatusCode != http.StatusOK {
+				t.Errorf("Expected response status to be %d, got %d.", http.StatusOK, getResponse.StatusCode)
+			}
 
 			// extract response body content.
 			responseBody, err := ioutil.ReadAll(getResponse.Body)
-			c.Assert(err, IsNil)
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
 			// assert the HTTP response body content with the expected content.
-			c.Assert(responseBody, DeepEquals, []byte("hello world"))
+			if !bytes.Equal(responseBody, []byte("hello world")) {
+				t.Errorf("The responseBody doesn't match the expected value.")
+			}
 		}()
 
 	}
@@ -1577,158 +1838,226 @@ func (s *TestSuiteCommon) TestObjectGet(c *C) {
 }
 
 // TestMultipleObjects - Validates upload and fetching of multiple object into the bucket.
-func (s *TestSuiteCommon) TestMultipleObjects(c *C) {
+func TestMultipleObjects(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create the bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// constructing HTTP request to fetch a non-existent object.
 	// expected to fail, error response asserted for expected error values later.
 	objectName := "testObject"
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Asserting the error response with the expected values.
-	verifyError(c, response, "NoSuchKey", "The specified key does not exist.", http.StatusNotFound)
+	verifyError(t, response, "NoSuchKey", "The specified key does not exist.", http.StatusNotFound)
 
 	objectName = "testObject1"
 	// content for the object to be uploaded.
 	buffer1 := bytes.NewReader([]byte("hello one"))
 	// create HTTP request for the object upload.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request for object upload.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the returned values.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// create HTTP request to fetch the object which was uploaded above.
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert whether 200 OK response status is obtained.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// extract the response body.
 	responseBody, err := ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the content body for the expected object data.
-	c.Assert(true, Equals, bytes.Equal(responseBody, []byte("hello one")))
+	if !bytes.Equal(responseBody, []byte("hello one")) {
+		t.Fatalf("The expected response content doesn't match with the actual one.")
+	}
 
 	// data for new object to be uploaded.
 	buffer2 := bytes.NewReader([]byte("hello two"))
 	objectName = "testObject2"
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer2.Len()), buffer2, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer2.Len()), buffer2, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request for object upload.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the response status code for expected value 200 OK.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// fetch the object which was uploaded above.
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request to fetch the object.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// assert the response status code for expected value 200 OK.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// verify response data
 	responseBody, err = ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
-	c.Assert(true, Equals, bytes.Equal(responseBody, []byte("hello two")))
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !bytes.Equal(responseBody, []byte("hello two")) {
+		t.Fatalf("The expected response content doesn't match with the actual one.")
+	}
 
 	// data for new object to be uploaded.
 	buffer3 := bytes.NewReader([]byte("hello three"))
 	objectName = "testObject3"
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer3.Len()), buffer3, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer3.Len()), buffer3, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// verify the response code with the expected value of 200 OK.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// fetch the object which was uploaded above.
-	request, err = newTestSignedRequest("GET", getPutObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getPutObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// verify object.
 	responseBody, err = ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
-	c.Assert(true, Equals, bytes.Equal(responseBody, []byte("hello three")))
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !bytes.Equal(responseBody, []byte("hello three")) {
+		t.Fatalf("The expected response content doesn't match with the actual one.")
+	}
 }
 
 // TestNotImplemented - validates if object policy is implemented, should return 'NotImplemented'.
-func (s *TestSuiteCommon) TestNotImplemented(c *C) {
+func TestNotImplemented(t *testing.T) {
 	// Generate a random bucket name.
 	bucketName := getRandomBucketName()
-	request, err := newTestSignedRequest("GET", s.endPoint+"/"+bucketName+"/object?policy",
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("GET", endPoint+"/"+bucketName+"/object?policy",
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusNotImplemented)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusNotImplemented {
+		t.Errorf("Expected response status %s, got %s", http.StatusNotImplemented, response.StatusCode)
+	}
 }
 
 // TestHeader - Validates the error response for an attempt to fetch non-existent object.
-func (s *TestSuiteCommon) TestHeader(c *C) {
+func TestHeader(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// obtain HTTP request to fetch an object from non-existent bucket/object.
-	request, err := newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, "testObject"),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, "testObject"),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// asserting for the expected error response.
-	verifyError(c, response, "NoSuchBucket", "The specified bucket does not exist", http.StatusNotFound)
+	verifyError(t, response, "NoSuchBucket", "The specified bucket does not exist", http.StatusNotFound)
 }
 
-func (s *TestSuiteCommon) TestPutBucket(c *C) {
+func TestPutBucket(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// Block 1: Testing for racey access
@@ -1741,14 +2070,16 @@ func (s *TestSuiteCommon) TestPutBucket(c *C) {
 		go func() {
 			defer wg.Done()
 			// HTTP request to create the bucket.
-			request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-				0, nil, s.accessKey, s.secretKey, s.signer)
-			c.Assert(err, IsNil)
+			request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+				0, nil, accessKey, secretKey, signerV4)
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
 
-			client := http.Client{Transport: s.transport}
+			client := &http.Client{}
 			response, err := client.Do(request)
 			if err != nil {
-				c.Fatalf("Put bucket Failed: <ERROR> %s", err)
+				t.Fatalf("Put bucket Failed: <ERROR> %s", err)
 			}
 			defer response.Body.Close()
 		}()
@@ -1758,14 +2089,20 @@ func (s *TestSuiteCommon) TestPutBucket(c *C) {
 	bucketName = getRandomBucketName()
 	//Block 2: testing for correctness of the functionality
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	response.Body.Close()
 }
 
@@ -1775,246 +2112,351 @@ func (s *TestSuiteCommon) TestPutBucket(c *C) {
 // 2. Insert Object.
 // 3. Use "X-Amz-Copy-Source" header to copy the previously created object.
 // 4. Validate the content of copied object.
-func (s *TestSuiteCommon) TestCopyObject(c *C) {
+func TestCopyObject(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// content for the object to be created.
 	buffer1 := bytes.NewReader([]byte("hello world"))
 	objectName := "testObject"
 	// create HTTP request for object upload.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
 	request.Header.Set("Content-Type", "application/json")
-	if s.signer == signerV2 {
-		c.Assert(err, IsNil)
-		err = signRequestV2(request, s.accessKey, s.secretKey)
+	if signerV4 == signerV2 {
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		err = signRequestV2(request, accessKey, secretKey)
 	}
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request for object upload.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objectName2 := "testObject2"
 	// Unlike the actual PUT object request, the request to Copy Object doesn't contain request body,
 	// empty body with the "X-Amz-Copy-Source" header pointing to the object to copies it in the backend.
-	request, err = newTestRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName2), 0, nil)
-	c.Assert(err, IsNil)
+	request, err = newTestRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName2), 0, nil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// setting the "X-Amz-Copy-Source" to allow copying the content of previously uploaded object.
 	request.Header.Set("X-Amz-Copy-Source", url.QueryEscape("/"+bucketName+"/"+objectName))
-	if s.signer == signerV4 {
-		err = signRequestV4(request, s.accessKey, s.secretKey)
+	if signerV4 == signerV4 {
+		err = signRequestV4(request, accessKey, secretKey)
 	} else {
-		err = signRequestV2(request, s.accessKey, s.secretKey)
+		err = signRequestV2(request, accessKey, secretKey)
 	}
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request.
 	// the content is expected to have the content of previous disk.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// creating HTTP request to fetch the previously uploaded object.
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName2),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName2),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// executing the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// validating the response status code.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// reading the response body.
 	// response body is expected to have the copied content of the first uploaded object.
 	object, err := ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
-	c.Assert(string(object), Equals, "hello world")
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	if string(object) != "hello world" {
+		t.Errorf("Expected response body doesn't match with actual one.")
+	}
+
 }
 
 // TestPutObject -  Tests successful put object request.
-func (s *TestSuiteCommon) TestPutObject(c *C) {
+func TestPutObject(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// content for new object upload.
 	buffer1 := bytes.NewReader([]byte("hello world"))
 	objectName := "testObject"
 	// creating HTTP request for object upload.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request for object upload.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// fetch the object back and verify its contents.
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request to fetch the object.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
-	c.Assert(response.ContentLength, Equals, int64(len([]byte("hello world"))))
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
+	if response.ContentLength != int64(len([]byte("hello world"))) {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	var buffer2 bytes.Buffer
 	// retrive the contents of response body.
 	n, err := io.Copy(&buffer2, response.Body)
-	c.Assert(err, IsNil)
-	c.Assert(n, Equals, int64(len([]byte("hello world"))))
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if n != int64(len([]byte("hello world"))) {
+		t.Errorf("Expected length of the response body to be %v, got %v.", len([]byte("hello world")), n)
+	}
 	// asserted the contents of the fetched object with the expected result.
-	c.Assert(true, Equals, bytes.Equal(buffer2.Bytes(), []byte("hello world")))
-
+	if !bytes.Equal(buffer2.Bytes(), []byte("hello world")) {
+		t.Errorf("contents of the fetched object doesn't match with the expected result.")
+	}
 }
 
 // TestListBuckets - Make request for listing of all buckets.
 // XML response is parsed.
 // Its success verifies the format of the response.
-func (s *TestSuiteCommon) TestListBuckets(c *C) {
+func TestListBuckets(t *testing.T) {
 	// create HTTP request for listing buckets.
-	request, err := newTestSignedRequest("GET", getListBucketURL(s.endPoint),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("GET", getListBucketURL(endPoint),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to list buckets.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	var results ListBucketsResponse
 	// parse the list bucket response.
 	decoder := xml.NewDecoder(response.Body)
 	err = decoder.Decode(&results)
 	// validating that the xml-decoding/parsing was successful.
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 }
 
 // This tests validate if PUT handler can successfully detect signature mismatch.
-func (s *TestSuiteCommon) TestValidateSignature(c *C) {
+func TestValidateSignature(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// Execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objName := "test-object"
 
 	// Body is on purpose set to nil so that we get payload generated for empty bytes.
 
 	// Create new HTTP request with incorrect secretKey to generate an incorrect signature.
-	secretKey := s.secretKey + "a"
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objName), 0, nil, s.accessKey, secretKey, s.signer)
-	c.Assert(err, IsNil)
+	secretKey := secretKey + "a"
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objName), 0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	verifyError(c, response, "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided. Check your key and signing method.", http.StatusForbidden)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	verifyError(t, response, "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided. Check your key and signing method.", http.StatusForbidden)
 }
 
 // This tests validate if PUT handler can successfully detect SHA256 mismatch.
-func (s *TestSuiteCommon) TestSHA256Mismatch(c *C) {
+func TestSHA256Mismatch(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// Execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objName := "test-object"
 
 	// Body is on purpose set to nil so that we get payload generated for empty bytes.
 
 	// Create new HTTP request with incorrect secretKey to generate an incorrect signature.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objName), 0, nil, s.accessKey, s.secretKey, s.signer)
-	if s.signer == signerV4 {
-		c.Assert(request.Header.Get("x-amz-content-sha256"), Equals, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objName), 0, nil, accessKey, secretKey, signerV4)
+	if signer == signerV4 {
+		if request.Header.Get("x-amz-content-sha256") != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+			t.Errorf("x-amz-content-sha256 header doesn't match with the expected one.")
+		}
 	}
 	// Set the body to generate signature mismatch.
 	request.Body = ioutil.NopCloser(bytes.NewReader([]byte("Hello, World")))
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	if s.signer == signerV4 {
-		verifyError(c, response, "XAmzContentSHA256Mismatch", "The provided 'x-amz-content-sha256' header does not match what was computed.", http.StatusBadRequest)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if signer == signerV4 {
+		verifyError(t, response, "XAmzContentSHA256Mismatch", "The provided 'x-amz-content-sha256' header does not match what was computed.", http.StatusBadRequest)
 	}
 }
 
 // TestNotBeAbleToCreateObjectInNonexistentBucket - Validates the error response
 // on an attempt to upload an object into a non-existent bucket.
-func (s *TestSuiteCommon) TestPutObjectLongName(c *C) {
+func TestPutObjectLongName(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// Execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// Content for the object to be uploaded.
 	buffer := bytes.NewReader([]byte("hello world"))
 	// make long object name.
 	longObjName := fmt.Sprintf("%0255d/%0255d/%0255d", 1, 1, 1)
 	// create new HTTP request to insert the object.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, longObjName),
-		int64(buffer.Len()), buffer, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, longObjName),
+		int64(buffer.Len()), buffer, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// make long object name.
 	longObjName = fmt.Sprintf("%0256d", 1)
 	buffer = bytes.NewReader([]byte("hello world"))
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, longObjName),
-		int64(buffer.Len()), buffer, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, longObjName),
+		int64(buffer.Len()), buffer, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	verifyError(c, response, "XMinioInvalidObjectName", "Object name contains unsupported characters. Unsupported characters are `^*|\\\"", http.StatusBadRequest)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	verifyError(t, response, "XMinioInvalidObjectName", "Object name contains unsupported characters. Unsupported characters are `^*|\\\"", http.StatusBadRequest)
 }
 
 // TestNotBeAbleToCreateObjectInNonexistentBucket - Validates the error response
 // on an attempt to upload an object into a non-existent bucket.
-func (s *TestSuiteCommon) TestNotBeAbleToCreateObjectInNonexistentBucket(c *C) {
+func TestNotBeAbleToCreateObjectInNonexistentBucket(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// content of the object to be uploaded.
@@ -2022,16 +2464,20 @@ func (s *TestSuiteCommon) TestNotBeAbleToCreateObjectInNonexistentBucket(c *C) {
 
 	// preparing for upload by generating the upload URL.
 	objectName := "test-object"
-	request, err := newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// Execute the HTTP request.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Assert the response error message.
-	verifyError(c, response, "NoSuchBucket", "The specified bucket does not exist", http.StatusNotFound)
+	verifyError(t, response, "NoSuchBucket", "The specified bucket does not exist", http.StatusNotFound)
 }
 
 // TestHeadOnObjectLastModified - Asserts response for HEAD on an object.
@@ -2040,415 +2486,623 @@ func (s *TestSuiteCommon) TestNotBeAbleToCreateObjectInNonexistentBucket(c *C) {
 // and If-Unmodified-Since headers set are validated.
 // If-Modified-Since - Return the object only if it has been modified since the specified time, else return a 304 (not modified).
 // If-Unmodified-Since - Return the object only if it has not been modified since the specified time, else return a 412 (precondition failed).
-func (s *TestSuiteCommon) TestHeadOnObjectLastModified(c *C) {
+func TestHeadOnObjectLastModified(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// preparing for object upload.
 	objectName := "test-object"
 	// content for the object to be uploaded.
 	buffer1 := bytes.NewReader([]byte("hello world"))
 	// obtaining URL for uploading the object.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// executing the HTTP request to download the object.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// make HTTP request to obtain object info.
-	request, err = newTestSignedRequest("HEAD", getHeadObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("HEAD", getHeadObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// verify the status of the HTTP response.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// retrive the info of last modification time of the object from the response header.
 	lastModified := response.Header.Get("Last-Modified")
 	// Parse it into time.Time structure.
-	t, err := time.Parse(http.TimeFormat, lastModified)
-	c.Assert(err, IsNil)
+	lastTime, err := time.Parse(http.TimeFormat, lastModified)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// make HTTP request to obtain object info.
 	// But this time set the "If-Modified-Since" header to be 10 minute more than the actual
 	// last modified time of the object.
-	request, err = newTestSignedRequest("HEAD", getHeadObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-	request.Header.Set("If-Modified-Since", t.Add(10*time.Minute).UTC().Format(http.TimeFormat))
+	request, err = newTestSignedRequest("HEAD", getHeadObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	request.Header.Set("If-Modified-Since", lastTime.Add(10*time.Minute).UTC().Format(http.TimeFormat))
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Since the "If-Modified-Since" header was ahead in time compared to the actual
 	// modified time of the object expecting the response status to be http.StatusNotModified.
-	c.Assert(response.StatusCode, Equals, http.StatusNotModified)
+	if response.StatusCode != http.StatusNotModified {
+		t.Errorf("Expected response status %s, got %s", http.StatusNotModified, response.StatusCode)
+	}
 
 	// Again, obtain the object info.
 	// This time setting "If-Unmodified-Since" to a time after the object is modified.
 	// As documented above, expecting http.StatusPreconditionFailed.
-	request, err = newTestSignedRequest("HEAD", getHeadObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-	request.Header.Set("If-Unmodified-Since", t.Add(-10*time.Minute).UTC().Format(http.TimeFormat))
+	request, err = newTestSignedRequest("HEAD", getHeadObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	request.Header.Set("If-Unmodified-Since", lastTime.Add(-10*time.Minute).UTC().Format(http.TimeFormat))
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusPreconditionFailed)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusPreconditionFailed {
+		t.Errorf("Expected response status %s, got %s", http.StatusPreconditionFailed, response.StatusCode)
+	}
 }
 
 // TestHeadOnBucket - Validates response for HEAD on the bucket.
 // HEAD request on the bucket validates the existence of the bucket.
-func (s *TestSuiteCommon) TestHeadOnBucket(c *C) {
+func TestHeadOnBucket(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getHEADBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getHEADBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// make HEAD request on the bucket.
-	request, err = newTestSignedRequest("HEAD", getHEADBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("HEAD", getHEADBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Asserting the response status for expected value of http.StatusOK.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 }
 
 // TestContentTypePersists - Object upload with different Content-type is first done.
 // And then a HEAD and GET request on these objects are done to validate if the same Content-Type set during upload persists.
-func (s *TestSuiteCommon) TestContentTypePersists(c *C) {
+func TestContentTypePersists(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// Uploading a new object with Content-Type "image/png".
 	// content for the object to be uploaded.
 	buffer1 := bytes.NewReader([]byte("hello world"))
 	objectName := "test-object.png"
 	// constructing HTTP request for object upload.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	request.Header.Set("Content-Type", "image/png")
-	if s.signer == signerV2 {
-		err = signRequestV2(request, s.accessKey, s.secretKey)
-		c.Assert(err, IsNil)
+	if signerV4 == signerV2 {
+		err = signRequestV2(request, accessKey, secretKey)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
 	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request for object upload.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// Fetching the object info using HEAD request for the object which was uploaded above.
-	request, err = newTestSignedRequest("HEAD", getHeadObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("HEAD", getHeadObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// Execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Verify if the Content-Type header is set during the object persists.
-	c.Assert(response.Header.Get("Content-Type"), Equals, "image/png")
+	respContentType := response.Header.Get("Content-Type")
+	expectedContentType := "image/png"
+
+	if respContentType != expectedContentType {
+		t.Errorf("Expected the response Content-Type to be `%s`, got `%s`", expectedContentType, respContentType)
+	}
 
 	// Fetching the object itself and then verify the Content-Type header.
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// Execute the HTTP to fetch the object.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// Verify if the Content-Type header is set during the object persists.
-	c.Assert(response.Header.Get("Content-Type"), Equals, "image/png")
+	if respContentType != expectedContentType {
+		t.Errorf("Expected the response Content-Type to be `%s`, got `%s`", expectedContentType, respContentType)
+	}
 
 	// Uploading a new object with Content-Type  "application/json".
 	objectName = "test-object.json"
 	buffer2 := bytes.NewReader([]byte("hello world"))
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer2.Len()), buffer2, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer2.Len()), buffer2, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// setting the request header to be application/json.
 	request.Header.Set("Content-Type", "application/json")
-	if s.signer == signerV2 {
-		err = signRequestV2(request, s.accessKey, s.secretKey)
-		c.Assert(err, IsNil)
+	if signerV4 == signerV2 {
+		err = signRequestV2(request, accessKey, secretKey)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
 	}
 
 	// Execute the HTTP request to upload the object.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// Obtain the info of the object which was uploaded above using HEAD request.
-	request, err = newTestSignedRequest("HEAD", getHeadObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("HEAD", getHeadObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	// Assert if the content-type header set during the object upload persists.
-	c.Assert(response.Header.Get("Content-Type"), Equals, "application/json")
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	respContentType = response.Header.Get("Content-Type")
+	expectedContentType = "application/json"
+	// Verify if the Content-Type header is set during the object persists.
+	if respContentType != expectedContentType {
+		t.Errorf("Expected the response Content-Type to be `%s`, got `%s`", expectedContentType, respContentType)
+	}
 
 	// Fetch the object and assert whether the Content-Type header persists.
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// Execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	// Assert if the content-type header set during the object upload persists.
-	c.Assert(response.Header.Get("Content-Type"), Equals, "application/json")
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	respContentType = response.Header.Get("Content-Type")
+	// Verify if the Content-Type header is set during the object persists.
+	if respContentType != expectedContentType {
+		t.Errorf("Expected the response Content-Type to be `%s`, got `%s`", expectedContentType, respContentType)
+	}
+
 }
 
 // TestPartialContent - Validating for GetObject with partial content request.
 // By setting the Range header, A request to send specific bytes range of data from an
 // already uploaded object can be done.
-func (s *TestSuiteCommon) TestPartialContent(c *C) {
+func TestPartialContent(t *testing.T) {
 	bucketName := getRandomBucketName()
 
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	buffer1 := bytes.NewReader([]byte("Hello World"))
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, "bar"),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, "bar"),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// Prepare request
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, "bar"),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, "bar"),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	request.Header.Add("Range", "bytes=6-7")
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusPartialContent)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusPartialContent {
+		t.Errorf("Expected response status %s, got %s", http.StatusPartialContent, response.StatusCode)
+	}
 	partialObject, err := ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	c.Assert(string(partialObject), Equals, "Wo")
+	if string(partialObject) != "Wo" {
+		t.Errorf("Expected partial object content differs from the expected one.")
+	}
 }
 
 // TestListObjectsHandler - Setting valid parameters to List Objects
 // and then asserting the response with the expected one.
-func (s *TestSuiteCommon) TestListObjectsHandler(c *C) {
+func TestListObjectsHandler(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	buffer1 := bytes.NewReader([]byte("Hello World"))
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, "bar"),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, "bar"),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// create listObjectsV1 request with valid parameters
-	request, err = newTestSignedRequest("GET", getListObjectsV1URL(s.endPoint, bucketName, "1000"),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-	client = http.Client{Transport: s.transport}
+	request, err = newTestSignedRequest("GET", getListObjectsV1URL(endPoint, bucketName, "1000"),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	client = &http.Client{}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	getContent, err := ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
-	c.Assert(strings.Contains(string(getContent), "<Key>bar</Key>"), Equals, true)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !strings.Contains(string(getContent), "<Key>bar</Key>") {
+		t.Errorf("Invalid Get content.")
+	}
 
 	// create listObjectsV2 request with valid parameters
-	request, err = newTestSignedRequest("GET", getListObjectsV2URL(s.endPoint, bucketName, "1000", ""),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-	client = http.Client{Transport: s.transport}
+	request, err = newTestSignedRequest("GET", getListObjectsV2URL(endPoint, bucketName, "1000", ""),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	client = &http.Client{}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	getContent, err = ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
-	c.Assert(strings.Contains(string(getContent), "<Key>bar</Key>"), Equals, true)
-	c.Assert(strings.Contains(string(getContent), "<Owner><ID></ID><DisplayName></DisplayName></Owner>"), Equals, true)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	if !strings.Contains(string(getContent), "<Key>bar</Key>") {
+		t.Errorf("Invalid content obtained from response body.")
+	}
+
+	if !strings.Contains(string(getContent), "<Owner><ID></ID><DisplayName></DisplayName></Owner>") {
+		t.Errorf("Invalid content obtained from response body.")
+	}
 
 	// create listObjectsV2 request with valid parameters and fetch-owner activated
-	request, err = newTestSignedRequest("GET", getListObjectsV2URL(s.endPoint, bucketName, "1000", "true"),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-	client = http.Client{Transport: s.transport}
+	request, err = newTestSignedRequest("GET", getListObjectsV2URL(endPoint, bucketName, "1000", "true"),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	client = &http.Client{}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	getContent, err = ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	c.Assert(strings.Contains(string(getContent), "<Key>bar</Key>"), Equals, true)
-	c.Assert(strings.Contains(string(getContent), "<Owner><ID>minio</ID><DisplayName>minio</DisplayName></Owner>"), Equals, true)
+	if !strings.Contains(string(getContent), "<Key>bar</Key>") {
+		t.Errorf("Invalid content obtained from response body.")
+	}
 
+	if !strings.Contains(string(getContent), "<Owner><ID>minio</ID><DisplayName>minio</DisplayName></Owner>") {
+		t.Errorf("Invalid content obtained from response body.")
+	}
 }
 
 // TestListObjectsHandlerErrors - Setting invalid parameters to List Objects
 // and then asserting the error response with the expected one.
-func (s *TestSuiteCommon) TestListObjectsHandlerErrors(c *C) {
+func TestListObjectsHandlerErrors(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// create listObjectsV1 request with invalid value of max-keys parameter. max-keys is set to -2.
-	request, err = newTestSignedRequest("GET", getListObjectsV1URL(s.endPoint, bucketName, "-2"),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-	client = http.Client{Transport: s.transport}
+	request, err = newTestSignedRequest("GET", getListObjectsV1URL(endPoint, bucketName, "-2"),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	client = &http.Client{}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// validating the error response.
-	verifyError(c, response, "InvalidArgument", "Argument maxKeys must be an integer between 0 and 2147483647", http.StatusBadRequest)
+	verifyError(t, response, "InvalidArgument", "Argument maxKeys must be an integer between 0 and 2147483647", http.StatusBadRequest)
 
 	// create listObjectsV2 request with invalid value of max-keys parameter. max-keys is set to -2.
-	request, err = newTestSignedRequest("GET", getListObjectsV2URL(s.endPoint, bucketName, "-2", ""),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-	client = http.Client{Transport: s.transport}
+	request, err = newTestSignedRequest("GET", getListObjectsV2URL(endPoint, bucketName, "-2", ""),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	client = &http.Client{}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// validating the error response.
-	verifyError(c, response, "InvalidArgument", "Argument maxKeys must be an integer between 0 and 2147483647", http.StatusBadRequest)
+	verifyError(t, response, "InvalidArgument", "Argument maxKeys must be an integer between 0 and 2147483647", http.StatusBadRequest)
 
 }
 
 // TestPutBucketErrors - request for non valid bucket operation
 // and validate it with expected error result.
-func (s *TestSuiteCommon) TestPutBucketErrors(c *C) {
+func TestPutBucketErrors(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// generating a HTTP request to create bucket.
 	// using invalid bucket name.
-	request, err := newTestSignedRequest("PUT", s.endPoint+"/putbucket-.",
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", endPoint+"/putbucket-.",
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// expected to fail with error message "InvalidBucketName".
-	verifyError(c, response, "InvalidBucketName", "The specified bucket is not valid.", http.StatusBadRequest)
+	verifyError(t, response, "InvalidBucketName", "The specified bucket is not valid.", http.StatusBadRequest)
 	// HTTP request to create the bucket.
-	request, err = newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// make HTTP request to create the same bucket again.
 	// expected to fail with error message "BucketAlreadyOwnedByYou".
-	request, err = newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	verifyError(c, response, "BucketAlreadyOwnedByYou", "Your previous request to create the named bucket succeeded and you already own it.",
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	verifyError(t, response, "BucketAlreadyOwnedByYou", "Your previous request to create the named bucket succeeded and you already own it.",
 		http.StatusConflict)
 
 	// request for ACL.
 	// Since Minio server doesn't support ACL's the request is expected to fail with  "NotImplemented" error message.
-	request, err = newTestSignedRequest("PUT", s.endPoint+"/"+bucketName+"?acl",
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", endPoint+"/"+bucketName+"?acl",
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	verifyError(c, response, "NotImplemented", "A header you provided implies functionality that is not implemented", http.StatusNotImplemented)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	verifyError(t, response, "NotImplemented", "A header you provided implies functionality that is not implemented", http.StatusNotImplemented)
 }
 
-func (s *TestSuiteCommon) TestGetObjectLarge10MiB(c *C) {
+func TestGetObjectLarge10MiB(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// form HTTP reqest to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create the bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	var buffer bytes.Buffer
 	line := `1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,
@@ -2470,49 +3124,71 @@ func (s *TestSuiteCommon) TestGetObjectLarge10MiB(c *C) {
 
 	objectName := "test-big-object"
 	// create HTTP request for object upload.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buf.Len()), buf, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buf.Len()), buf, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Assert the status code to verify successful upload.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// prepare HTTP requests to download the object.
-	request, err = newTestSignedRequest("GET", getPutObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getPutObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request to download the object.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// extract the content from response body.
 	getContent, err := ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// Compare putContent and getContent.
-	c.Assert(string(getContent), Equals, putContent)
+	if string(getContent) != putContent {
+		t.Errorf("Put and get content differ.")
+	}
 }
 
 // TestGetObjectLarge11MiB - Tests validate fetching of an object of size 11MB.
-func (s *TestSuiteCommon) TestGetObjectLarge11MiB(c *C) {
+func TestGetObjectLarge11MiB(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	var buffer bytes.Buffer
 	line := `1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,
@@ -2535,53 +3211,75 @@ func (s *TestSuiteCommon) TestGetObjectLarge11MiB(c *C) {
 	// Put object
 	buf := bytes.NewReader(buffer.Bytes())
 	// create HTTP request foe object upload.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buf.Len()), buf, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buf.Len()), buf, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request for object upload.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// create HTTP request to download the object.
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// fetch the content from response body.
 	getContent, err := ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// Get md5Sum of the response content.
 	getMD5 := sumMD5(getContent)
 
 	// Compare putContent and getContent.
-	c.Assert(hex.EncodeToString(putMD5), Equals, hex.EncodeToString(getMD5))
+	if hex.EncodeToString(putMD5) != hex.EncodeToString(getMD5) {
+		t.Errorf("Get and Put content differ.")
+	}
 }
 
 // TestGetPartialObjectMisAligned - tests get object partially mis-aligned.
 // create a large buffer of mis-aligned data and upload it.
 // then make partial range requests to while fetching it back and assert the response content.
-func (s *TestSuiteCommon) TestGetPartialObjectMisAligned(c *C) {
+func TestGetPartialObjectMisAligned(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create the bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	var buffer bytes.Buffer
 	line := `1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,
@@ -2605,15 +3303,21 @@ func (s *TestSuiteCommon) TestGetPartialObjectMisAligned(c *C) {
 
 	objectName := "test-big-file"
 	// HTTP request to upload the object.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buf.Len()), buf, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buf.Len()), buf, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request to upload the object.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// test Cases containing data to make partial range requests.
 	// also has expected response data.
@@ -2633,43 +3337,60 @@ func (s *TestSuiteCommon) TestGetPartialObjectMisAligned(c *C) {
 		// request for last 7 bytes of the object.
 		{"-7", putContent[len(putContent)-7:]},
 	}
-	for _, t := range testCases {
+	for _, testCase := range testCases {
 		// HTTP request to download the object.
-		request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-			0, nil, s.accessKey, s.secretKey, s.signer)
-		c.Assert(err, IsNil)
+		request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+			0, nil, accessKey, secretKey, signerV4)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
 		// Get partial content based on the byte range set.
-		request.Header.Add("Range", "bytes="+t.byteRange)
+		request.Header.Add("Range", "bytes="+testCase.byteRange)
 
-		client = http.Client{Transport: s.transport}
+		client = &http.Client{}
 		// execute the HTTP request.
 		response, err = client.Do(request)
-		c.Assert(err, IsNil)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
 		// Since only part of the object is requested, expecting response status to be http.StatusPartialContent .
-		c.Assert(response.StatusCode, Equals, http.StatusPartialContent)
+		// Assert the status code to verify successful upload.
+		if response.StatusCode != http.StatusPartialContent {
+			t.Errorf("Expected response status %s, got %s", http.StatusPartialContent, response.StatusCode)
+		}
 		// parse the HTTP response body.
 		getContent, err := ioutil.ReadAll(response.Body)
-		c.Assert(err, IsNil)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
 
 		// Compare putContent and getContent.
-		c.Assert(string(getContent), Equals, t.expectedString)
+		if string(getContent) != testCase.expectedString {
+			t.Errorf("Get and Put content differ.")
+		}
 	}
 }
 
 // TestGetPartialObjectLarge11MiB - Test validates partial content request for a 11MiB object.
-func (s *TestSuiteCommon) TestGetPartialObjectLarge11MiB(c *C) {
+func TestGetPartialObjectLarge11MiB(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create the bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	var buffer bytes.Buffer
 	line := `234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,
@@ -2693,53 +3414,75 @@ func (s *TestSuiteCommon) TestGetPartialObjectLarge11MiB(c *C) {
 
 	buf := bytes.NewReader([]byte(putContent))
 	// HTTP request to upload the object.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buf.Len()), buf, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buf.Len()), buf, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request to upload the object.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// HTTP request to download the object.
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// This range spans into first two blocks.
 	request.Header.Add("Range", "bytes=10485750-10485769")
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Since only part of the object is requested, expecting response status to be http.StatusPartialContent .
-	c.Assert(response.StatusCode, Equals, http.StatusPartialContent)
+	if response.StatusCode != http.StatusPartialContent {
+		t.Errorf("Expected response status %s, got %s", http.StatusPartialContent, response.StatusCode)
+	}
 	// read the downloaded content from the response body.
 	getContent, err := ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// Compare putContent and getContent.
-	c.Assert(string(getContent), Equals, putContent[10485750:10485770])
+	if string(getContent) != putContent[10485750:10485770] {
+		t.Errorf("Put and Get content doesn't match.")
+	}
 }
 
 // TestGetPartialObjectLarge11MiB - Test validates partial content request for a 10MiB object.
-func (s *TestSuiteCommon) TestGetPartialObjectLarge10MiB(c *C) {
+func TestGetPartialObjectLarge10MiB(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
 	// expecting the error to be nil.
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// expecting the HTTP response status code to 200 OK.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	var buffer bytes.Buffer
 	line := `1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,1234567890,
@@ -2762,139 +3505,192 @@ func (s *TestSuiteCommon) TestGetPartialObjectLarge10MiB(c *C) {
 
 	objectName := "test-big-10Mb-file"
 	// HTTP request to upload the object.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buf.Len()), buf, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buf.Len()), buf, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request to upload the object.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// verify whether upload was successful.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// HTTP request to download the object.
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Get partial content based on the byte range set.
 	request.Header.Add("Range", "bytes=2048-2058")
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request to download the partila content.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Since only part of the object is requested, expecting response status to be http.StatusPartialContent .
-	c.Assert(response.StatusCode, Equals, http.StatusPartialContent)
+	// verify whether upload was successful.
+	if response.StatusCode != http.StatusPartialContent {
+		t.Errorf("Expected response status %s, got %s", http.StatusPartialContent, response.StatusCode)
+	}
+
 	// read the downloaded content from the response body.
 	getContent, err := ioutil.ReadAll(response.Body)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// Compare putContent and getContent.
-	c.Assert(string(getContent), Equals, putContent[2048:2059])
+	if string(getContent) != putContent[2048:2059] {
+		t.Errorf("Get content doesn't match with the put content.")
+	}
 }
 
 // TestGetObjectErrors - Tests validate error response for invalid object operations.
-func (s *TestSuiteCommon) TestGetObjectErrors(c *C) {
+func TestGetObjectErrors(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objectName := "test-non-exitent-object"
 	// HTTP request to download the object.
 	// Since the specified object doesn't exist in the given bucket,
 	// expected to fail with error message "NoSuchKey"
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	verifyError(c, response, "NoSuchKey", "The specified key does not exist.", http.StatusNotFound)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	verifyError(t, response, "NoSuchKey", "The specified key does not exist.", http.StatusNotFound)
 
 	// request to download an object, but an invalid bucket name is set.
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, "/getobjecterrors-.", objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
-
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, "getobjecterrors-.", objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// expected to fail with "InvalidBucketName".
-	verifyError(c, response, "InvalidBucketName", "The specified bucket is not valid.", http.StatusBadRequest)
+	verifyError(t, response, "InvalidBucketName", "The specified bucket is not valid.", http.StatusBadRequest)
 }
 
 // TestGetObjectRangeErrors - Validate error response when object is fetched with incorrect byte range value.
-func (s *TestSuiteCommon) TestGetObjectRangeErrors(c *C) {
+func TestGetObjectRangeErrors(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// content for the object to be uploaded.
 	buffer1 := bytes.NewReader([]byte("Hello World"))
 
 	objectName := "test-object"
 	// HTTP request to upload the object.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request to upload the object.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// verify whether upload was successful.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// HTTP request to download the object.
-	request, err = newTestSignedRequest("GET", getGetObjectURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
+	request, err = newTestSignedRequest("GET", getGetObjectURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
 	// Invalid byte range set.
 	request.Header.Add("Range", "bytes=-0")
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// expected to fail with "InvalidRange" error message.
-	verifyError(c, response, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+	verifyError(t, response, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
 }
 
 // TestObjectMultipartAbort - Test validates abortion of a multipart upload after uploading 2 parts.
-func (s *TestSuiteCommon) TestObjectMultipartAbort(c *C) {
+func TestObjectMultipartAbort(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objectName := "test-multipart-object"
 
@@ -2906,142 +3702,212 @@ func (s *TestSuiteCommon) TestObjectMultipartAbort(c *C) {
 	// and the case where there is only one upload ID.
 
 	// construct HTTP request to initiate a NewMultipart upload.
-	request, err = newTestSignedRequest("POST", getNewMultipartURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("POST", getNewMultipartURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// execute the HTTP request initiating the new multipart upload.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// parse the response body and obtain the new upload ID.
 	decoder := xml.NewDecoder(response.Body)
 	newResponse := &InitiateMultipartUploadResponse{}
 
 	err = decoder.Decode(newResponse)
-	c.Assert(err, IsNil)
-	c.Assert(len(newResponse.UploadID) > 0, Equals, true)
-
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if len(newResponse.UploadID) <= 0 {
+		t.Fatalf("Expected the length of the UploadID to be greater than 0.")
+	}
 	// construct HTTP request to initiate a NewMultipart upload.
-	request, err = newTestSignedRequest("POST", getNewMultipartURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("POST", getNewMultipartURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// execute the HTTP request initiating the new multipart upload.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// parse the response body and obtain the new upload ID.
 	decoder = xml.NewDecoder(response.Body)
 	newResponse = &InitiateMultipartUploadResponse{}
 
 	err = decoder.Decode(newResponse)
-	c.Assert(err, IsNil)
-	c.Assert(len(newResponse.UploadID) > 0, Equals, true)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if len(newResponse.UploadID) <= 0 {
+		t.Fatalf("Expected the length of the UploadID to be greater than 0.")
+	}
 	// uploadID to be used for rest of the multipart operations on the object.
 	uploadID := newResponse.UploadID
 
 	// content for the part to be uploaded.
 	buffer1 := bytes.NewReader([]byte("hello world"))
 	// HTTP request for the part to be uploaded.
-	request, err = newTestSignedRequest("PUT", getPartUploadURL(s.endPoint, bucketName, objectName, uploadID, "1"),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPartUploadURL(endPoint, bucketName, objectName, uploadID, "1"),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request to upload the first part.
 	response1, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response1.StatusCode, Equals, http.StatusOK)
-
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response1.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response1.StatusCode)
+	}
 	// content for the second part to be uploaded.
 	buffer2 := bytes.NewReader([]byte("hello world"))
 	// HTTP request for the second part to be uploaded.
-	request, err = newTestSignedRequest("PUT", getPartUploadURL(s.endPoint, bucketName, objectName, uploadID, "2"),
-		int64(buffer2.Len()), buffer2, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPartUploadURL(endPoint, bucketName, objectName, uploadID, "2"),
+		int64(buffer2.Len()), buffer2, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request to upload the second part.
 	response2, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response2.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response2.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response2.StatusCode)
+	}
 	// HTTP request for aborting the multipart upload.
-	request, err = newTestSignedRequest("DELETE", getAbortMultipartUploadURL(s.endPoint, bucketName, objectName, uploadID),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("DELETE", getAbortMultipartUploadURL(endPoint, bucketName, objectName, uploadID),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request to abort the multipart upload.
 	response3, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// expecting the response status code to be http.StatusNoContent.
 	// The assertion validates the success of Abort Multipart operation.
-	c.Assert(response3.StatusCode, Equals, http.StatusNoContent)
+	if response3.StatusCode != http.StatusNoContent {
+		t.Errorf("Expected response status %s, got %s", http.StatusNoContent, response3.StatusCode)
+	}
 }
 
 // TestBucketMultipartList - Initiates a NewMultipart upload, uploads parts and validates listing of the parts.
-func (s *TestSuiteCommon) TestBucketMultipartList(c *C) {
+func TestBucketMultipartList(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName), 0,
-		nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName), 0,
+		nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, 200)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objectName := "test-multipart-object"
 	// construct HTTP request to initiate a NewMultipart upload.
-	request, err = newTestSignedRequest("POST", getNewMultipartURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("POST", getNewMultipartURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request initiating the new multipart upload.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// expecting the response status code to be http.StatusOK(200 OK) .
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// parse the response body and obtain the new upload ID.
 	decoder := xml.NewDecoder(response.Body)
 	newResponse := &InitiateMultipartUploadResponse{}
 
 	err = decoder.Decode(newResponse)
-	c.Assert(err, IsNil)
-	c.Assert(len(newResponse.UploadID) > 0, Equals, true)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if len(newResponse.UploadID) <= 0 {
+		t.Fatalf("Expected the length of the UploadID to be greater than 0.")
+	}
 	// uploadID to be used for rest of the multipart operations on the object.
 	uploadID := newResponse.UploadID
 
 	// content for the part to be uploaded.
 	buffer1 := bytes.NewReader([]byte("hello world"))
 	// HTTP request for the part to be uploaded.
-	request, err = newTestSignedRequest("PUT", getPartUploadURL(s.endPoint, bucketName, objectName, uploadID, "1"),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPartUploadURL(endPoint, bucketName, objectName, uploadID, "1"),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request to upload the first part.
 	response1, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response1.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response1.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response1.StatusCode)
+	}
 
 	// content for the second part to be uploaded.
 	buffer2 := bytes.NewReader([]byte("hello world"))
 	// HTTP request for the second part to be uploaded.
-	request, err = newTestSignedRequest("PUT", getPartUploadURL(s.endPoint, bucketName, objectName, uploadID, "2"),
-		int64(buffer2.Len()), buffer2, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPartUploadURL(endPoint, bucketName, objectName, uploadID, "2"),
+		int64(buffer2.Len()), buffer2, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request to upload the second part.
 	response2, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response2.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response2.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response2.StatusCode)
+	}
 
 	// HTTP request to ListMultipart Uploads.
-	request, err = newTestSignedRequest("GET", getListMultipartURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getListMultipartURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request.
 	response3, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response3.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response3.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response3.StatusCode)
+	}
 
 	// The reason to duplicate this structure here is to verify if the
 	// unmarshalling works from a client perspective, specifically
@@ -3082,145 +3948,210 @@ func (s *TestSuiteCommon) TestBucketMultipartList(c *C) {
 	decoder = xml.NewDecoder(response3.Body)
 	newResponse3 := &listMultipartUploadsResponse{}
 	err = decoder.Decode(newResponse3)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Assert the bucket name in the response with the expected bucketName.
-	c.Assert(newResponse3.Bucket, Equals, bucketName)
-	// Assert the bucket name in the response with the expected bucketName.
-	c.Assert(newResponse3.IsTruncated, Equals, false)
+	if newResponse3.Bucket != bucketName {
+		t.Errorf("The bucket name is response doesn't match with expected bucket name.")
+	}
+	// Assert the IsTruncated field in the response with the expected bucketName.
+	if newResponse3.IsTruncated != false {
+		t.Errorf("IsTruncated field in the response doesn't match with the expected bucketName.")
+	}
 }
 
 // TestValidateObjectMultipartUploadID - Test Initiates a new multipart upload and validates the uploadID.
-func (s *TestSuiteCommon) TestValidateObjectMultipartUploadID(c *C) {
+func TestValidateObjectMultipartUploadID(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, 200)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objectName := "directory1/directory2/object"
 	// construct HTTP request to initiate a NewMultipart upload.
-	request, err = newTestSignedRequest("POST", getNewMultipartURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("POST", getNewMultipartURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request initiating the new multipart upload.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	// parse the response body and obtain the new upload ID.
 	decoder := xml.NewDecoder(response.Body)
 	newResponse := &InitiateMultipartUploadResponse{}
 	err = decoder.Decode(newResponse)
 	// expecting the decoding error to be nil.
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Verifying for Upload ID value to be greater than 0.
-	c.Assert(len(newResponse.UploadID) > 0, Equals, true)
+	if len(newResponse.UploadID) <= 0 {
+		t.Fatalf("Expected the length of the UploadID to be greater than 0.")
+	}
 }
 
 // TestObjectMultipartListError - Initiates a NewMultipart upload, uploads parts and validates
 // error response for an incorrect max-parts parameter .
-func (s *TestSuiteCommon) TestObjectMultipartListError(c *C) {
+func TestObjectMultipartListError(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, 200)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objectName := "test-multipart-object"
 	// construct HTTP request to initiate a NewMultipart upload.
-	request, err = newTestSignedRequest("POST", getNewMultipartURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("POST", getNewMultipartURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request initiating the new multipart upload.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// parse the response body and obtain the new upload ID.
 	decoder := xml.NewDecoder(response.Body)
 	newResponse := &InitiateMultipartUploadResponse{}
 
 	err = decoder.Decode(newResponse)
-	c.Assert(err, IsNil)
-	c.Assert(len(newResponse.UploadID) > 0, Equals, true)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if len(newResponse.UploadID) <= 0 {
+		t.Fatalf("Expected the length of the UploadID to be greater than 0.")
+	}
 	// uploadID to be used for rest of the multipart operations on the object.
 	uploadID := newResponse.UploadID
 
 	// content for the part to be uploaded.
 	buffer1 := bytes.NewReader([]byte("hello world"))
 	// HTTP request for the part to be uploaded.
-	request, err = newTestSignedRequest("PUT", getPartUploadURL(s.endPoint, bucketName, objectName, uploadID, "1"),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPartUploadURL(endPoint, bucketName, objectName, uploadID, "1"),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request to upload the first part.
 	response1, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response1.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response1.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response1.StatusCode)
+	}
 
 	// content for the second part to be uploaded.
 	buffer2 := bytes.NewReader([]byte("hello world"))
 	// HTTP request for the second part to be uploaded.
-	request, err = newTestSignedRequest("PUT", getPartUploadURL(s.endPoint, bucketName, objectName, uploadID, "2"),
-		int64(buffer2.Len()), buffer2, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPartUploadURL(endPoint, bucketName, objectName, uploadID, "2"),
+		int64(buffer2.Len()), buffer2, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
 	// execute the HTTP request to upload the second part.
 	response2, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response2.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response2.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response2.StatusCode)
+	}
 
 	// HTTP request to ListMultipart Uploads.
 	// max-keys is set to valid value of 1
-	request, err = newTestSignedRequest("GET", getListMultipartURLWithParams(s.endPoint, bucketName, objectName, uploadID, "1", "", ""),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getListMultipartURLWithParams(endPoint, bucketName, objectName, uploadID, "1", "", ""),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request.
 	response3, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response3.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response3.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response3.StatusCode)
+	}
 
 	// HTTP request to ListMultipart Uploads.
 	// max-keys is set to invalid value of -2.
-	request, err = newTestSignedRequest("GET", getListMultipartURLWithParams(s.endPoint, bucketName, objectName, uploadID, "-2", "", ""),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("GET", getListMultipartURLWithParams(endPoint, bucketName, objectName, uploadID, "-2", "", ""),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// execute the HTTP request.
 	response4, err := client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Since max-keys parameter in the ListMultipart request set to invalid value of -2,
 	// its expected to fail with error message "InvalidArgument".
-	verifyError(c, response4, "InvalidArgument", "Argument max-parts must be an integer between 0 and 2147483647", http.StatusBadRequest)
+	verifyError(t, response4, "InvalidArgument", "Argument max-parts must be an integer between 0 and 2147483647", http.StatusBadRequest)
 }
 
 // TestObjectValidMD5 - First uploads an object with a valid Content-Md5 header and verifies the status,
 // then upload an object in a wrong Content-Md5 and validate the error response.
-func (s *TestSuiteCommon) TestObjectValidMD5(c *C) {
+func TestObjectValidMD5(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, 200)
-
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// Create a byte array of 5MB.
 	// content for the object to be uploaded.
 	data := bytes.Repeat([]byte("0123456789abcdef"), 5*1024*1024/16)
@@ -3232,68 +4163,93 @@ func (s *TestSuiteCommon) TestObjectValidMD5(c *C) {
 	buffer1 := bytes.NewReader(data)
 	objectName := "test-1-object"
 	// HTTP request for the object to be uploaded.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// set the Content-Md5 to be the hash to content.
 	request.Header.Set("Content-Md5", base64.StdEncoding.EncodeToString(md5Sum))
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// expecting a successful upload.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	objectName = "test-2-object"
 	buffer1 = bytes.NewReader(data)
 	// HTTP request for the object to be uploaded.
-	request, err = newTestSignedRequest("PUT", getPutObjectURL(s.endPoint, bucketName, objectName),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("PUT", getPutObjectURL(endPoint, bucketName, objectName),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// set Content-Md5 to invalid value.
 	request.Header.Set("Content-Md5", "kvLTlMrX9NpYDQlEIFlnDA==")
 	// expecting a failure during upload.
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Since Content-Md5 header was wrong, expecting to fail with "SignatureDoesNotMatch" error.
-	verifyError(c, response, "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided. Check your key and signing method.", http.StatusForbidden)
+	verifyError(t, response, "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided. Check your key and signing method.", http.StatusForbidden)
 }
 
 // TestObjectMultipart - Initiates a NewMultipart upload, uploads 2 parts,
 // completes the multipart upload and validates the status of the operation.
-func (s *TestSuiteCommon) TestObjectMultipart(c *C) {
+func TestObjectMultipart(t *testing.T) {
 	// generate a random bucket name.
 	bucketName := getRandomBucketName()
 	// HTTP request to create the bucket.
-	request, err := newTestSignedRequest("PUT", getMakeBucketURL(s.endPoint, bucketName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err := newTestSignedRequest("PUT", getMakeBucketURL(endPoint, bucketName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client := http.Client{Transport: s.transport}
+	client := &http.Client{}
 	// execute the HTTP request to create bucket.
 	response, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response.StatusCode, Equals, 200)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 	objectName := "test-multipart-object"
 	// construct HTTP request to initiate a NewMultipart upload.
-	request, err = newTestSignedRequest("POST", getNewMultipartURL(s.endPoint, bucketName, objectName),
-		0, nil, s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("POST", getNewMultipartURL(endPoint, bucketName, objectName),
+		0, nil, accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request initiating the new multipart upload.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// expecting the response status code to be http.StatusOK(200 OK).
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 	// parse the response body and obtain the new upload ID.
 	decoder := xml.NewDecoder(response.Body)
 	newResponse := &InitiateMultipartUploadResponse{}
 
 	err = decoder.Decode(newResponse)
-	c.Assert(err, IsNil)
-	c.Assert(len(newResponse.UploadID) > 0, Equals, true)
-	// uploadID to be used for rest of the multipart operations on the object.
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if len(newResponse.UploadID) <= 0 {
+		t.Fatalf("Expected the length of the UploadID to be greater than 0.")
+	} // uploadID to be used for rest of the multipart operations on the object.
 	uploadID := newResponse.UploadID
 
 	// content for the part to be uploaded.
@@ -3306,17 +4262,23 @@ func (s *TestSuiteCommon) TestObjectMultipart(c *C) {
 
 	buffer1 := bytes.NewReader(data)
 	// HTTP request for the part to be uploaded.
-	request, err = newTestSignedRequest("PUT", getPartUploadURL(s.endPoint, bucketName, objectName, uploadID, "1"),
-		int64(buffer1.Len()), buffer1, s.accessKey, s.secretKey, s.signer)
+	request, err = newTestSignedRequest("PUT", getPartUploadURL(endPoint, bucketName, objectName, uploadID, "1"),
+		int64(buffer1.Len()), buffer1, accessKey, secretKey, signerV4)
 	// set the Content-Md5 header to the base64 encoding the md5Sum of the content.
 	request.Header.Set("Content-Md5", base64.StdEncoding.EncodeToString(md5Sum))
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request to upload the first part.
 	response1, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response1.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response1.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response1.StatusCode)
+	}
 
 	// content for the second part to be uploaded.
 	// Create a byte array of 1 byte.
@@ -3329,17 +4291,23 @@ func (s *TestSuiteCommon) TestObjectMultipart(c *C) {
 
 	buffer2 := bytes.NewReader(data)
 	// HTTP request for the second part to be uploaded.
-	request, err = newTestSignedRequest("PUT", getPartUploadURL(s.endPoint, bucketName, objectName, uploadID, "2"),
-		int64(buffer2.Len()), buffer2, s.accessKey, s.secretKey, s.signer)
+	request, err = newTestSignedRequest("PUT", getPartUploadURL(endPoint, bucketName, objectName, uploadID, "2"),
+		int64(buffer2.Len()), buffer2, accessKey, secretKey, signerV4)
 	// set the Content-Md5 header to the base64 encoding the md5Sum of the content.
 	request.Header.Set("Content-Md5", base64.StdEncoding.EncodeToString(md5Sum))
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 
-	client = http.Client{Transport: s.transport}
+	client = &http.Client{}
 	// execute the HTTP request to upload the second part.
 	response2, err := client.Do(request)
-	c.Assert(err, IsNil)
-	c.Assert(response2.StatusCode, Equals, http.StatusOK)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if response2.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response2.StatusCode)
+	}
 
 	// Complete multipart upload
 	completeUploads := &completeMultipartUpload{
@@ -3356,15 +4324,23 @@ func (s *TestSuiteCommon) TestObjectMultipart(c *C) {
 	}
 
 	completeBytes, err := xml.Marshal(completeUploads)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Indicating that all parts are uploaded and initiating completeMultipartUpload.
-	request, err = newTestSignedRequest("POST", getCompleteMultipartUploadURL(s.endPoint, bucketName, objectName, uploadID),
-		int64(len(completeBytes)), bytes.NewReader(completeBytes), s.accessKey, s.secretKey, s.signer)
-	c.Assert(err, IsNil)
+	request, err = newTestSignedRequest("POST", getCompleteMultipartUploadURL(endPoint, bucketName, objectName, uploadID),
+		int64(len(completeBytes)), bytes.NewReader(completeBytes), accessKey, secretKey, signerV4)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// Execute the complete multipart request.
 	response, err = client.Do(request)
-	c.Assert(err, IsNil)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
 	// verify whether complete multipart was successful.
-	c.Assert(response.StatusCode, Equals, http.StatusOK)
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("Expected response status %s, got %s", http.StatusOK, response.StatusCode)
+	}
 
 }
