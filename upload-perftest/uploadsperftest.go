@@ -173,7 +173,7 @@ func (og *ObjGen) Seek(off int64, whence int) (int64, error) {
 	case io.SeekEnd:
 		nval = og.ObjectSize - off
 	}
-	if nval < 0 || nval >= og.ObjectSize {
+	if nval < 0 || nval > og.ObjectSize {
 		return 0, errors.New("invalid seek offset")
 	}
 	og.readIndex = nval
